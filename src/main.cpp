@@ -163,8 +163,9 @@ void write_character(uint8_t character, uint8_t pos, CRGB color, int offset=0) {
 }
 
 
-void scroll_message_smooth(String s, int spos, int scroll_delay){
+void scroll_message_smooth(String s, int spos, bool scroll=true){
   String substring = s.substring(spos, spos+21);
+  int skip_from = 0;
   for (int offset=0; offset>=-5; offset--){  
     //Serial.printf("offset: %d\n", offset);
     FastLED.clear();
@@ -186,10 +187,22 @@ void scroll_message_smooth(String s, int spos, int scroll_delay){
       if (pos < s.length()){ // access limit by end of string
         thechar = s.c_str()[spos+pos];
       }
+      if (skip_from > 0 && pos > skip_from){
+        thechar = ' ';
+      }
+      switch (thechar){
+        case '\n':
+          thechar = ' ';
+          skip_from = pos;
+          break;
+      }
       write_character(thechar, pos, c, offset);
     }
-    FastLED.show();
-    delay(scroll_delay);
+    if (!scroll){
+      return;
+    } else {
+      FastLED.show();
+    }
   }
 }
 
@@ -222,15 +235,55 @@ void write_message(String s, int mode=0){
 }
 
 
-void story_time(int scroll_delay){
+void story_time(){
     static int spos = 0;
+    static bool start_pause = true;
 
-    if (spos >= 0 && spos + 21 <= story.length()) {
-      spos++;
-    } else {
-      spos = 0;
+    if (story.c_str()[spos] == '\n'){
+      // animate matrix with a nice transition
+      for (int b=1; b<30; b++){
+        FastLED.clear();
+        for (int x=0; x<NUM_LEDS/5; x++){
+          for (int y=0; y<7; y++){
+            set_led(x, y, CHSV(abs(sin(b/10.0)*cos(x/10.0))*255, 100+random(b*3,b*4), 130-b*4+random(20)));
+          }
+        }
+        FastLED.show();
+        delay(20);
+      }
+      // reset cursor to just past the newline
+      bool printable = false;
+      while (!printable && spos < story.length()){
+        char c = story.c_str()[spos+1];
+        if (c == '\n' || c == ' '){
+          printable = false;
+        } else {
+          printable = true;
+        }
+        spos++;
+      }
+      start_pause = true;
+      FastLED.clear();
+    } else {      
+      if (start_pause){
+        start_pause = false;
+        for (int b=30; b>0; b--){
+          scroll_message_smooth(story, spos, false);
+          for (int i=0; i<NUM_LEDS; i++){
+            leds[i].fadeToBlackBy(random(b*6,b*10));
+          }
+          FastLED.show();
+          delay(20);
+        }
+        // delay(1000);
+      }
+      scroll_message_smooth(story, spos, true);
+      if (spos >= 0 && spos + 21 <= story.length()) {
+        spos++;
+      } else {
+        spos = 0;
+      }
     }
-    scroll_message_smooth(story, spos, scroll_delay);
 }
 
 void headlines(){
@@ -259,7 +312,7 @@ void headlines(){
 void setup() {
   // set up fastled
   Serial.begin(115200);
-  FastLED.addLeds<WS2812B, 5, GRB>(leds, NUM_LEDS);
+  FastLED.addLeds<WS2812Controller800Khz, 5, GRB>(leds, NUM_LEDS);
   FastLED.setBrightness(10);
 
   pinMode(0, INPUT_PULLUP);
@@ -293,7 +346,7 @@ void loop() {
 
   switch(mode){
     case 0:
-      story_time(1);
+      story_time();
       break;
     case 1:
       test_patterns();

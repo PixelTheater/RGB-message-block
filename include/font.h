@@ -25,8 +25,8 @@
 #define FONT_CHAR_WIDTH 5
 
 // 5x7 font decoder
-#define FONT_BIT(c, column, row) ((font_A02[(c)][(column)] & 1<<(1+(row))) != 0)
-  
+// #define FONT_BIT(c, column, row) ((font_A02[(c)][(column)] & 1<<(1+(row))) != 0)
+#define FONT_BIT(c, column, row) ((font_mo[(c)][(column)] & 1<<((row))) != 0)  
 
 
 // Matrix orbital
