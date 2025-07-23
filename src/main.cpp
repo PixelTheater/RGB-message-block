@@ -1,7 +1,8 @@
 #include <Arduino.h>
 #include <FastLED.h>
 #include "font.h"
-#include "story.h"
+#include "led_art.h"
+#include "led_history.h"
 #include <vector>
 
 const char *phrases[] = {
@@ -18,38 +19,6 @@ const char *phrases[] = {
 };
 
 #define NUM_PHRASES 10
-// const char *phrases[] = {
-//     "A wizard, old&wise,",
-//     "cast a spell:'\xAB\xCD'",
-//     "to save`the kingdom",
-//     "from dragons@ night.",
-//     "He said,\"Beware of ",
-//     "the dark!\"$%&'()*+,-",
-//     "/;<=>?@[\\]^_`{|}~.",
-//     "His apprentice, Zed",
-//     "listened closely...",
-//     "Armed with^courage,",
-//     "Zed journeyed_far.",
-//     "Mountains, rivers; ",
-//     "forests_enchanted.",
-//     "Each step: a new`",
-//     "challenge. His path",
-//     "twisted&turned~<>",
-//     "facing fears, hope,",
-//     "and despair. 'Till",
-//     "at last, the final",
-//     "battle_loomed.`",
-//     "With magic words:",
-//     "\"Fiat lux!\"{he roared",
-//     "and light shone out",
-//     "Darkness fled away",
-//     "Peace returned, and",
-//     "Zed became a hero.",
-//     "His tale: timeless.",
-//     "End of tale... (32-",
-//     "127 ASCII chars)~",
-//     "The End. ~Wizardry"
-// };
 
 CRGB phrase_colors[] = {
   CHSV(60, 255, 128),    // Bright yellow
@@ -66,8 +35,16 @@ CRGB phrase_colors[] = {
 
 #define NUM_CHARS 20
 #define NUM_LEDS 5*7*NUM_CHARS  // 5x7 LEDs per character, 2 characters per display
+#define MAX_BRIGHTNESS 30
 
 CRGB leds[NUM_LEDS];
+
+// Global static variables for story and mode management
+static int spos = 0;
+static int currentStoryIndex = 0;
+
+// Declare stories vector globally
+std::vector<String> stories;
 
 void color_show(){
   // light up all LEDs in sequence
@@ -101,26 +78,14 @@ void color_show(){
 void set_led(uint8_t x, uint8_t y, CRGB color) {
   if (x < NUM_CHARS*5 && y < 7) {
     int offset = x/5*30;
-    // as it's a zig-zag pattern, we use the row to adjust x
-    int x2 = x;
-    if (y % 2 == 1){
-      int x_start = floor(x/5.0)*5;
-      x2 = x_start + 4-(x % 5);
-    }
-    leds[y*5+x2+offset] = color;
+    leds[y*5+x+offset] = color;
   }
 }
 
 void fade_led(uint8_t x, uint8_t y, uint8_t fade) {
   if (x < NUM_CHARS*5 && y < 7) {
     int offset = x/5*30;
-    // as it's a zig-zag pattern, we use the row to adjust x
-    int x2 = x;
-    if (y % 2 == 1){
-      int x_start = floor(x/5.0)*5;
-      x2 = x_start + 4-(x % 5);
-    }
-    leds[y*5+x2+offset].fadeToBlackBy(fade);
+    leds[y*5+x+offset].fadeToBlackBy(fade);
   }
 }
 
@@ -236,10 +201,10 @@ void write_message(String s, int mode=0){
 
 
 void story_time(){
-    static int spos = 0;
     static bool start_pause = true;
+    // static int currentStoryIndex = 0; // Remove local static declaration
 
-    if (story.c_str()[spos] == '\n'){
+    if (stories[currentStoryIndex].c_str()[spos] == '\n'){
       // animate matrix with a nice transition
       for (int b=1; b<30; b++){
         FastLED.clear();
@@ -253,8 +218,8 @@ void story_time(){
       }
       // reset cursor to just past the newline
       bool printable = false;
-      while (!printable && spos < story.length()){
-        char c = story.c_str()[spos+1];
+      while (!printable && spos < stories[currentStoryIndex].length()){
+        char c = stories[currentStoryIndex].c_str()[spos+1];
         if (c == '\n' || c == ' '){
           printable = false;
         } else {
@@ -268,7 +233,7 @@ void story_time(){
       if (start_pause){
         start_pause = false;
         for (int b=30; b>0; b--){
-          scroll_message_smooth(story, spos, false);
+          scroll_message_smooth(stories[currentStoryIndex], spos, false);
           for (int i=0; i<NUM_LEDS; i++){
             leds[i].fadeToBlackBy(random(b*6,b*10));
           }
@@ -277,11 +242,12 @@ void story_time(){
         }
         // delay(1000);
       }
-      scroll_message_smooth(story, spos, true);
-      if (spos >= 0 && spos + 21 <= story.length()) {
+      scroll_message_smooth(stories[currentStoryIndex], spos, true);
+      if (spos >= 0 && spos + 21 <= stories[currentStoryIndex].length()) {
         spos++;
       } else {
         spos = 0;
+        currentStoryIndex = (currentStoryIndex + 1) % stories.size();
       }
     }
 }
@@ -313,35 +279,66 @@ void setup() {
   // set up fastled
   Serial.begin(115200);
   FastLED.addLeds<WS2812Controller800Khz, 5, GRB>(leds, NUM_LEDS);
-  FastLED.setBrightness(10);
+  FastLED.setBrightness(MAX_BRIGHTNESS);
 
   pinMode(0, INPUT_PULLUP);
 
-  // ConnectToWifi();
-  //news = fetchHeadlines();
+  // Populate stories vector
+  stories.clear();
+  stories.push_back(led_art_story);
+  stories.push_back(led_history_story);
+
   delay(500);
   Serial.printf("Number of LEDs: %d\n", NUM_LEDS);
   Serial.println("Start");
 }
 
 #define NUM_MODES 3
+unsigned long buttonPressTime = 0;
+bool longPressActive = false;
+
 void loop() {
   static int mode = 0;
 
-  // check if button is pressed, if so, change mode
-  if (digitalRead(0) == LOW){
-    mode = (mode + 1) % NUM_MODES;
-    Serial.printf("Button pressed, changing mode to %\n", mode);
-    // show visual feedback
-    while (digitalRead(0) == LOW){
-      CRGB c = CRGB::White;
-      FastLED.setBrightness(50);
-      c.setHSV(millis()/100 % 255, 255, 50);
-      FastLED.showColor(c);
-      FastLED.show(); 
-      delay(20); 
+  // Check if button is pressed
+  if (digitalRead(0) == LOW) {
+    if (buttonPressTime == 0) {
+      buttonPressTime = millis(); // Mark the time button was first pressed
     }
-    Serial.println("Button released");
+    // If button held for more than 1 second, toggle mode
+    if (millis() - buttonPressTime > 1000 && !longPressActive) {
+      mode = (mode + 1) % NUM_MODES;
+      Serial.printf("Button held, changing mode to %d\n", mode);
+      longPressActive = true;
+      // Visual feedback for long press
+      FastLED.setBrightness(MAX_BRIGHTNESS/2);
+      for (int i = 0; i < 5; i++) { // Flash 5 times
+        FastLED.showColor(CRGB::Blue);
+        delay(100);
+        FastLED.clear();
+        delay(100);
+      }
+    }
+  } else { // Button is released
+    if (buttonPressTime > 0) { // Button was pressed
+      if (!longPressActive) { // It was a short press
+        if (mode == 0) { // Only change story if in story mode
+          currentStoryIndex = (currentStoryIndex + 1) % stories.size(); // Use stories.size()
+          // Reset story scroll position when changing story
+          spos = 0;
+          Serial.printf("Button tapped, changing story to %d\n", currentStoryIndex);
+        } else {
+          mode = 0; // If not in story mode, a short tap reverts to story mode
+          Serial.println("Button tapped, reverting to story mode");
+        }
+        // Visual feedback for short press
+        FastLED.setBrightness(MAX_BRIGHTNESS/2);
+        FastLED.showColor(CRGB::Green);
+        FastLED.clear();
+      }
+      buttonPressTime = 0; // Reset button press time
+      longPressActive = false; // Reset long press flag
+    }
   }
 
   switch(mode){
@@ -353,9 +350,6 @@ void loop() {
       break;
     case 2:
       color_show();
-      break;
-    case 3:
-      headlines();
       break;
   }
 
