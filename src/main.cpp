@@ -9,14 +9,29 @@
 #define ENABLE_BENCHMARKING true  // Set to false to disable performance monitoring
                                   // If you get crashes, try setting this to false first
 
-// SCROLL MODE SETTINGS
-#define SMOOTH_SCROLLING true     // Enable/disable smooth character transitions
-#define CPS_TARGET 15.0            // Characters per second target (when smooth scrolling off)
-                                  // Smooth scrolling ignores this and runs at max speed
-                                  
+// DISPLAY MODE SETTINGS  
+#define NUM_DISPLAY_MODES 4       // Total number of display modes (reduced from 5)
+#define CPS_TARGET 15.0           // Characters per second for line reading speed calculation
+#define LINE_TRANSITION_SMOOTH true // Enable smooth transitions between lines (vs instant)
+
+// DISPLAY MODES (Button press cycles through all modes, loops back to 0):
+// Mode 0: Smooth scroll (6-step character transitions)
+// Mode 1: Character scroll (fast 1-step transitions) 
+// Mode 2: Line-by-line with vertical slide transitions (old line slides up, new slides in from bottom)
+// Mode 3: Line-by-line with cursor wipe transitions
+
+// IMPROVEMENTS:
+// - Button cycling now properly loops back to mode 0
+// - Line slide mode now has true vertical sliding animation with 2-pixel spacing
+// - Smart word wrapping prevents breaking words across lines
+// - Removed redundant line fade mode
+// - Cursor mode stops at text end and flashes (no typing spaces)
+// - All line modes use word-based coloring (consistent with scroll modes)
+
 // MODE COMPARISON:
-// SMOOTH_SCROLLING = true:  Beautiful 6-step transitions, max speed, more FastLED calls
-// SMOOTH_SCROLLING = false: Clean 1-step updates, configurable CPS speed, fewer FastLED calls
+// Scroll modes: Continuous character-by-character movement
+// Line modes: Show complete lines with transitions, calculated timing for readability
+// =========================================================
 
 
 // Performance benchmarking structures
@@ -185,13 +200,13 @@ void write_character(uint8_t character, uint8_t pos, CRGB color, int offset=0) {
 }
 
 
-void scroll_message_smooth(String s, int spos, bool scroll=true){
+void scroll_message_smooth(String s, int spos, bool scroll=true, int smoothSteps=1){
   START_TIMER(scroll_op);
   
   String substring = s.substring(spos, spos+21);
   int skip_from = 0;
-  // Use smooth scrolling setting: 6 steps for smooth, 1 step for fast
-  int smoothSteps = (scroll && SMOOTH_SCROLLING) ? 6 : 1;
+  // Use passed smoothness parameter
+  if (!scroll) smoothSteps = 1; // Force single step if not scrolling
   
   for (int step = 0; step < smoothSteps; step++){  
     // Calculate offset based on smooth steps (0 to -(smoothSteps-1))
@@ -245,6 +260,208 @@ void scroll_message_smooth(String s, int spos, bool scroll=true){
   END_TIMER(scroll_op, perf.scrollTime);
 }
 
+// Helper function for word-based coloring (consistent with scroll modes)
+CRGB getWordColor(String text, int pos) {
+  int prev_space = 0;
+  // search backwards from current pos in string for a space
+  for (int i = pos; i >= 0; i--){
+    if (text.c_str()[i] == ' '){
+      prev_space = i;
+      break;
+    }
+  }
+  // set color based on prev_space (same logic as scroll modes)
+  return CHSV((prev_space % 25)*(10), 255, 180);
+}
+
+// Line-by-line display functions
+void display_line_slide(String prevLine, String newLine, bool slideUp=true) {
+  // Display line with true vertical slide transition
+  int slideSteps = LINE_TRANSITION_SMOOTH ? 9 : 1; // Increased to accommodate 2-pixel gap
+  
+  for (int step = 0; step < slideSteps; step++) {
+    FastLED.clear();
+    
+    // Calculate vertical positions with 2-pixel gap
+    int prevY = -step; // Previous line moves up and out
+    int newY = 9 - step; // New line moves up from bottom (7 + 2 pixel gap)
+    
+    // Draw previous line moving up
+    for (int pos = 0; pos < NUM_CHARS && pos < prevLine.length(); pos++) {
+      char prevChar = prevLine.c_str()[pos];
+      CRGB prevColor = getWordColor(prevLine, pos); // Use word-based coloring
+      
+      // Draw character at shifted vertical position
+      for (int py = 0; py < 7; py++) {
+        int actualY = py + prevY;
+        if (actualY >= 0 && actualY < 7) { // Only draw if within bounds
+          for (int px = 0; px < 5; px++) {
+            if (FONT_BIT(prevChar - 16, px, py)) {
+              set_led(pos*5 + px, actualY, prevColor);
+            }
+          }
+        }
+      }
+    }
+    
+    // Draw new line moving up from bottom
+    for (int pos = 0; pos < NUM_CHARS && pos < newLine.length(); pos++) {
+      char newChar = newLine.c_str()[pos];
+      CRGB newColor = getWordColor(newLine, pos); // Use word-based coloring
+      
+      // Draw character at shifted vertical position
+      for (int py = 0; py < 7; py++) {
+        int actualY = py + newY;
+        if (actualY >= 0 && actualY < 7) { // Only draw if within bounds
+          for (int px = 0; px < 5; px++) {
+            if (FONT_BIT(newChar - 16, px, py)) {
+              set_led(pos*5 + px, actualY, newColor);
+            }
+          }
+        }
+      }
+    }
+    
+    START_TIMER(led_show_slide);
+    FastLED.show();
+    END_FASTLED_TIMER(led_show_slide, perf.fastLEDShowTime);
+    delay(40);
+  }
+}
+
+void display_line_cursor_wipe(String line) {
+  // Display line with cursor wipe effect - stops at actual text end and flashes
+  
+  // Find actual end of text (excluding trailing spaces)
+  String trimmedLine = line;
+  trimmedLine.trim();
+  int textLength = trimmedLine.length();
+  
+  int wipeSteps = LINE_TRANSITION_SMOOTH ? textLength : 1;
+  
+  // Wipe phase - reveal characters one by one
+  for (int wipe = 0; wipe <= wipeSteps; wipe++) {
+    FastLED.clear();
+    
+    for (int pos = 0; pos < NUM_CHARS; pos++) {
+      CRGB c = CRGB::Black;
+      char thechar = ' ';
+      
+      if (pos < textLength) {
+        thechar = line.c_str()[pos];
+        
+        if (pos < wipe) {
+          // Character revealed - use word-based coloring
+          c = getWordColor(line, pos);
+        } else if (pos == wipe) {
+          // Cursor position during wipe
+          c = CRGB::White;
+          thechar = '_';
+        }
+      }
+      
+      write_character(thechar, pos, c);
+    }
+    
+    START_TIMER(led_show_wipe);
+    FastLED.show();
+    END_FASTLED_TIMER(led_show_wipe, perf.fastLEDShowTime);
+    delay(80);
+  }
+  
+  // Pause phase - flash cursor at end of text
+  if (LINE_TRANSITION_SMOOTH) {
+    for (int flash = 0; flash < 3; flash++) { // Flash 3 times
+      // Show text with cursor
+      FastLED.clear();
+      for (int pos = 0; pos < textLength; pos++) {
+        char thechar = line.c_str()[pos];
+        CRGB c = getWordColor(line, pos);
+        write_character(thechar, pos, c);
+      }
+      // Add flashing cursor at end
+      if (textLength < NUM_CHARS) {
+        write_character('_', textLength, CRGB::White);
+      }
+      
+      START_TIMER(led_show_flash_on);
+      FastLED.show();
+      END_FASTLED_TIMER(led_show_flash_on, perf.fastLEDShowTime);
+      delay(200);
+      
+      // Show text without cursor
+      FastLED.clear();
+      for (int pos = 0; pos < textLength; pos++) {
+        char thechar = line.c_str()[pos];
+        CRGB c = getWordColor(line, pos);
+        write_character(thechar, pos, c);
+      }
+      
+      START_TIMER(led_show_flash_off);
+      FastLED.show();
+      END_FASTLED_TIMER(led_show_flash_off, perf.fastLEDShowTime);
+      delay(200);
+    }
+  }
+}
+
+// Extract lines from story text with smart word wrapping
+std::vector<String> extractLines(String story) {
+  std::vector<String> lines;
+  int start = 0;
+  
+  while (start < story.length()) {
+    int end = story.indexOf('\n', start);
+    if (end == -1) end = story.length();
+    
+    String line = story.substring(start, end);
+    line.trim();
+    
+    if (line.length() > 0) {
+      // Handle lines that are too long with smart word wrapping
+      while (line.length() > NUM_CHARS) {
+        String currentLine;
+        int lastSpace = -1;
+        
+        // Find the best break point (last space within display width)
+        for (int i = 0; i < NUM_CHARS && i < line.length(); i++) {
+          if (line.c_str()[i] == ' ') {
+            lastSpace = i;
+          }
+        }
+        
+        if (lastSpace > 0 && lastSpace < NUM_CHARS) {
+          // Break at the last space within display width
+          currentLine = line.substring(0, lastSpace);
+          // Pad with spaces to full width for clean display
+          while (currentLine.length() < NUM_CHARS) {
+            currentLine += " ";
+          }
+          lines.push_back(currentLine);
+          line = line.substring(lastSpace + 1); // Skip the space
+        } else {
+          // No good break point found, force break (rare case)
+          currentLine = line.substring(0, NUM_CHARS);
+          lines.push_back(currentLine);
+          line = line.substring(NUM_CHARS);
+        }
+      }
+      
+      if (line.length() > 0) {
+        // Pad short lines with spaces for consistent display
+        while (line.length() < NUM_CHARS) {
+          line += " ";
+        }
+        lines.push_back(line);
+      }
+    }
+    
+    start = end + 1;
+  }
+  
+  return lines;
+}
+
 void write_message(String s, int mode=0){
   for (int i = 0; i < NUM_CHARS; i++) {
     char thechar = ' ';
@@ -276,42 +493,60 @@ void write_message(String s, int mode=0){
 }
 
 
-void story_time(){
-    static bool start_pause = true;
-    // static int currentStoryIndex = 0; // Remove local static declaration
+void display_story(int mode){
+  static bool start_pause = true;
+  static unsigned long lastCharacterTime = 0;
+  static unsigned long lastLineTime = 0;
+  static int lastSpos = -1;
+  static int currentLineIndex = 0;
+  static std::vector<String> currentLines;
+  static String previousLine = "";
+  
+  // Randomly select story on first run or story end
+  if (currentLines.empty() || (mode >= 2 && currentLineIndex >= currentLines.size())) {
+    currentStoryIndex = random(stories.size());
+    currentLines = extractLines(stories[currentStoryIndex]);
+    currentLineIndex = 0;
+    spos = 0;
+    Serial.printf("New story selected: %d (%d lines)\n", currentStoryIndex, currentLines.size());
+  }
 
-    if (stories[currentStoryIndex].c_str()[spos] == '\n'){
-      // animate matrix with a nice transition
-      for (int b=1; b<30; b++){
-        FastLED.clear();
-        for (int x=0; x<NUM_LEDS/5; x++){
-          for (int y=0; y<7; y++){
-            set_led(x, y, CHSV(abs(sin(b/10.0)*cos(x/10.0))*255, 100+random(b*3,b*4), 130-b*4+random(20)));
-          }
-        }
-        START_TIMER(led_show_transition);
-        FastLED.show();
-        END_FASTLED_TIMER(led_show_transition, perf.fastLEDShowTime);
-        delay(20);
-      }
-      // reset cursor to just past the newline
-      bool printable = false;
-      while (!printable && spos < stories[currentStoryIndex].length()){
-        char c = stories[currentStoryIndex].c_str()[spos+1];
-        if (c == '\n' || c == ' '){
-          printable = false;
-        } else {
-          printable = true;
-        }
-        spos++;
-      }
-      start_pause = true;
+  // Handle newline transitions for scroll modes
+  if (mode <= 1 && stories[currentStoryIndex].c_str()[spos] == '\n') {
+    // animate matrix with a nice transition
+    for (int b=1; b<30; b++){
       FastLED.clear();
-    } else {      
-      if (start_pause){
+      for (int x=0; x<NUM_LEDS/5; x++){
+        for (int y=0; y<7; y++){
+          set_led(x, y, CHSV(abs(sin(b/10.0)*cos(x/10.0))*255, 100+random(b*3,b*4), 130-b*4+random(20)));
+        }
+      }
+      START_TIMER(led_show_transition);
+      FastLED.show();
+      END_FASTLED_TIMER(led_show_transition, perf.fastLEDShowTime);
+      delay(20);
+    }
+    // reset cursor to just past the newline
+    bool printable = false;
+    while (!printable && spos < stories[currentStoryIndex].length()){
+      char c = stories[currentStoryIndex].c_str()[spos+1];
+      if (c == '\n' || c == ' '){
+        printable = false;
+      } else {
+        printable = true;
+      }
+      spos++;
+    }
+    start_pause = true;
+    FastLED.clear();
+  }
+
+  switch (mode) {
+    case 0: // Smooth scroll (6-step transitions)
+      if (start_pause) {
         start_pause = false;
         for (int b=30; b>0; b--){
-          scroll_message_smooth(stories[currentStoryIndex], spos, false);
+          scroll_message_smooth(stories[currentStoryIndex], spos, false, 6);
           for (int i=0; i<NUM_LEDS; i++){
             leds[i].fadeToBlackBy(random(b*6,b*10));
           }
@@ -320,40 +555,110 @@ void story_time(){
           END_FASTLED_TIMER(led_show_pause, perf.fastLEDShowTime);
           delay(20);
         }
-        // delay(1000);
       }
-      scroll_message_smooth(stories[currentStoryIndex], spos, true);
-      
-      // Speed control and CPS tracking
-      static unsigned long lastCharacterTime = 0;
-      static int lastSpos = -1;
-      
-      bool shouldAdvance = true;
-      if (!SMOOTH_SCROLLING) {
-        // When smooth scrolling is off, control speed to hit CPS target
-        unsigned long currentTime = millis();
-        unsigned long targetDelay = 1000.0 / CPS_TARGET; // ms per character
-        
-        if (currentTime - lastCharacterTime < targetDelay) {
-          shouldAdvance = false; // Skip advancing this frame
-        } else {
-          lastCharacterTime = currentTime;
-        }
-      }
-      
-      if (shouldAdvance && spos >= 0 && spos + 21 <= stories[currentStoryIndex].length()) {
+      scroll_message_smooth(stories[currentStoryIndex], spos, true, 6);
+      if (spos >= 0 && spos + 21 <= stories[currentStoryIndex].length()) {
         spos++;
-        // Track character scrolling for CPS measurement
         if (spos != lastSpos) {
           perf.charactersScrolled++;
           lastSpos = spos;
         }
-      } else if (shouldAdvance) {
+      } else {
         spos = 0;
-        currentStoryIndex = (currentStoryIndex + 1) % stories.size();
-        perf.charactersScrolled++; // Count story transitions
+        currentLines.clear(); // Force story change
+        perf.charactersScrolled++;
       }
-    }
+      break;
+      
+    case 1: // Character scroll (fast 1-step transitions)
+      {
+        if (start_pause) {
+          start_pause = false;
+          for (int b=30; b>0; b--){
+            scroll_message_smooth(stories[currentStoryIndex], spos, false, 1);
+            for (int i=0; i<NUM_LEDS; i++){
+              leds[i].fadeToBlackBy(random(b*6,b*10));
+            }
+            START_TIMER(led_show_pause);
+            FastLED.show();
+            END_FASTLED_TIMER(led_show_pause, perf.fastLEDShowTime);
+            delay(20);
+          }
+        }
+        
+        // Speed control for character mode
+        bool shouldAdvance = true;
+        unsigned long currentTime = millis();
+        unsigned long targetDelay = 1000.0 / CPS_TARGET;
+        
+        if (currentTime - lastCharacterTime < targetDelay) {
+          shouldAdvance = false;
+        } else {
+          lastCharacterTime = currentTime;
+        }
+        
+        scroll_message_smooth(stories[currentStoryIndex], spos, true, 1);
+        if (shouldAdvance && spos >= 0 && spos + 21 <= stories[currentStoryIndex].length()) {
+          spos++;
+          if (spos != lastSpos) {
+            perf.charactersScrolled++;
+            lastSpos = spos;
+          }
+        } else if (shouldAdvance) {
+          spos = 0;
+          currentLines.clear(); // Force story change
+          perf.charactersScrolled++;
+        }
+      }
+      break;
+      
+    case 2: // Line-by-line with vertical slide transitions
+    case 3: // Line-by-line with cursor wipe transitions
+      {
+        unsigned long currentTime = millis();
+        // Calculate line display time based on CPS and line length
+        if (currentLineIndex < currentLines.size()) {
+          String currentLine = currentLines[currentLineIndex];
+          unsigned long lineDisplayTime = (currentLine.length() * 1000.0) / CPS_TARGET;
+          
+          if (currentTime - lastLineTime >= lineDisplayTime) {
+            // Time to show next line
+            if (currentLineIndex < currentLines.size()) {
+              String lineToShow = currentLines[currentLineIndex];
+              
+              switch (mode) {
+                case 2: // Slide transition
+                  display_line_slide(previousLine, lineToShow, true);
+                  break;
+                case 3: // Cursor wipe transition
+                  display_line_cursor_wipe(lineToShow);
+                  break;
+              }
+              
+              previousLine = lineToShow;
+              currentLineIndex++;
+              lastLineTime = currentTime;
+              perf.charactersScrolled += lineToShow.length();
+            }
+          } else {
+            // Still displaying current line - just maintain display
+            if (currentLineIndex > 0 && currentLineIndex <= currentLines.size()) {
+              String currentLine = currentLines[currentLineIndex - 1];
+              FastLED.clear();
+              for (int pos = 0; pos < NUM_CHARS && pos < currentLine.length(); pos++) {
+                char thechar = currentLine.c_str()[pos];
+                CRGB c = getWordColor(currentLine, pos); // Use word-based coloring
+                write_character(thechar, pos, c);
+              }
+              START_TIMER(led_show_maintain);
+              FastLED.show();
+              END_FASTLED_TIMER(led_show_maintain, perf.fastLEDShowTime);
+            }
+          }
+        }
+      }
+      break;
+  }
 }
 
 void headlines(){
@@ -401,8 +706,8 @@ void reportPerformance() {
                   (float)perf.visualUpdateCount / perf.frameCount, avgFastLEDTime);
     Serial.printf("Character Write: %.2fms | Scroll: %.2fms | Calc: %.2fms\n", 
                   avgCharWriteTime, avgScrollTime, avgCalcTime);
-    Serial.printf("Actual CPS: %.1f | Target: %.1f | Smooth: %s\n", 
-                  actualCPS, CPS_TARGET, SMOOTH_SCROLLING ? "ON" : "OFF");
+    Serial.printf("Actual CPS: %.1f | Target: %.1f | Transitions: %s\n", 
+                  actualCPS, CPS_TARGET, LINE_TRANSITION_SMOOTH ? "Smooth" : "Fast");
     Serial.printf("CPU Usage: %.1f%% | Hardware Wait: %.1f%%\n", cpuUsagePercent, hardwareWaitPercent);
     Serial.printf("Loops: %lu | Visual Updates: %lu | Characters: %lu | LEDs: %d\n", 
                   perf.frameCount, perf.visualUpdateCount, perf.charactersScrolled, NUM_LEDS);
@@ -431,6 +736,9 @@ void setup() {
   FastLED.setBrightness(MAX_BRIGHTNESS);
 
   pinMode(0, INPUT_PULLUP);
+
+  // Initialize random seed for story selection
+  randomSeed(analogRead(A0) + millis());
 
   // Populate stories vector
   stories.clear();
@@ -463,7 +771,7 @@ void setup() {
   Serial.println("Start");
 }
 
-#define NUM_MODES 3
+#define NUM_MODES 4
 unsigned long buttonPressTime = 0;
 bool longPressActive = false;
 
@@ -479,7 +787,8 @@ void loop() {
     // If button held for more than 1 second, toggle mode
     if (millis() - buttonPressTime > 1000 && !longPressActive) {
       mode = (mode + 1) % NUM_MODES;
-      Serial.printf("Button held, changing mode to %d\n", mode);
+      const char* modeNames[] = {"Smooth Scroll", "Character Scroll", "Line Slide", "Line Cursor"};
+      Serial.printf("Button held, changing to mode %d: %s\n", mode, modeNames[mode]);
       longPressActive = true;
       // Visual feedback for long press
       FastLED.setBrightness(MAX_BRIGHTNESS/2);
@@ -494,16 +803,10 @@ void loop() {
   } else { // Button is released
     if (buttonPressTime > 0) { // Button was pressed
       if (!longPressActive) { // It was a short press
-        if (mode == 0) { // Only change story if in story mode
-          currentStoryIndex = (currentStoryIndex + 1) % stories.size(); // Use stories.size()
-          // Reset story scroll position when changing story
-          spos = 0;
-          Serial.printf("Button tapped, changing story to %d\n", currentStoryIndex);
-          // Visual feedback for short press - removed (too brief to see, wastes FastLED calls)
-        } else {
-          mode = 0; // If not in story mode, a short tap reverts to story mode
-          Serial.println("Button tapped, reverting to story mode");
-        }
+        // Short press also cycles modes
+        mode = (mode + 1) % NUM_MODES;
+        const char* modeNames[] = {"Smooth Scroll", "Character Scroll", "Line Slide", "Line Cursor"};
+        Serial.printf("Button tapped, changing to mode %d: %s\n", mode, modeNames[mode]);
         // Visual feedback for short press - removed (too brief to see, wastes FastLED calls)
       }
       buttonPressTime = 0; // Reset button press time
@@ -512,14 +815,11 @@ void loop() {
   }
 
   switch(mode){
-    case 0:
-      story_time();
-      break;
-    case 1:
-      test_patterns();
-      break;
-    case 2:
-      color_show();
+    case 0: // Smooth scroll
+    case 1: // Character scroll  
+    case 2: // Line slide
+    case 3: // Line cursor wipe
+      display_story(mode);
       break;
   }
 
