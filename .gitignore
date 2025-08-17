@@ -1,5 +1,5 @@
-.pio
-.vscode
-.vscode/*
+.pio/
+.vscode/
 *\~.skp
 .DS_Store
+settings.json
